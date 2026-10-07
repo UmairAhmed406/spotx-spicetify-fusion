@@ -248,6 +248,17 @@ DevTools Protocol against the actual running client, not just string matching):
   ...)` on every navigation to Marketplace despite the file being reachable. Section D now detects the actual global
   name from `xpui.js` itself (matching the `typeof self?self:global).<name>=` pattern) instead of hardcoding it.
 
+#### Marketplace shows only the "Installed" tab — Themes/Extensions/Snippets/Apps missing
+
+This is **not a bug in this repo's scripts** and no `fix.ps1` re-run will change it — it's a Marketplace setting, not
+broken state in `xpui.js`. Marketplace fetches its Themes/Extensions/Snippets/Apps catalogs from GitHub's search API
+(10 requests/minute, unauthenticated), and if one of those calls ever gets rate-limited, Marketplace **permanently
+disables that tab** and saves the decision to its own IndexedDB database (`spicetify-marketplace` → `settings` →
+key `marketplace:tabs`, a `{name, enabled}` list) — it does not retry or re-enable itself once the rate limit clears.
+
+**Fix**: open Marketplace, click the gear icon (⚙️, "Marketplace Settings") next to the search bar, and re-enable
+the missing tabs there. No file edit or `fix.ps1` re-run needed.
+
 ## 📚 Investigative Blog Articles (In-Depth Technical Deep Dive)
 
 For the full reverse-engineering reports with decompiled bytecode and AST analyses, read our technical trilogy (Chinese only):
