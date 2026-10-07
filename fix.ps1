@@ -17,6 +17,10 @@
     4. Spotify 1.2.x compatibility:
        - Fixes SpotX index.html redirection dropping xpui-snapshot.js
        - Normalizes v8_context_snapshot.bin casing from SpotX commit 9fa954a
+       - Restores the Marketplace nav icon, /marketplace route and stylesheet
+         that Spicetify's apply.go never wires up when xpui-snapshot.js is
+         missing, patching the live bundle and Spicetify's staging copies so
+         it survives the next `spicetify apply` (see fix-marketplace-nav.ps1)
 .LINK
     https://github.com/ZGQ-inc/spotx-spicetify-fusion
 #>
@@ -40,7 +44,7 @@ function Write-Log {
     }
 }
 
-Write-Log " SpotX + Spicetify Unified Compatibility Hotfix (v2.1)" "Cyan"
+Write-Log " SpotX + Spicetify Unified Compatibility Hotfix (v2.2)" "Cyan"
 Write-Log " Supports Spotify 1.2.x (Webpack) & 1.3.x+ (Rspack)" "Cyan"
 Write-Log " GitHub: https://github.com/ZGQ-inc/spotx-spicetify-fusion" "Cyan"
 
@@ -186,6 +190,91 @@ if ($customAppBundles.Count -gt 0) {
         $xpuiContent = $xpuiContent.Replace($cssTarget, $cssTarget + $cssMapSb.ToString())
         $xpuiPatched = $true
         Write-Log "  [+] Injected Custom Apps into MiniCss allowlist" "Green"
+    }
+}
+
+# B5: restore Marketplace nav icon / route / stylesheet on the pre-1.3.0
+# webpack-style bundle shape. SpotX points index.html at /xpui.js and drops
+# xpui-snapshot.js, so Spicetify's apply.go rewrite (gated on
+# <script src="/xpui-snapshot.js">) never fires and the custom-app patches
+# below never reach the xpui.js the client actually loads.
+#
+# Deliberately NOT gated on $is130OrAbove: that flag's rspackChunk string
+# fallback has been observed to misfire on genuine 1.2.x builds (the chunk
+# loader global can be named rspackChunkclient_web even on a pre-1.3.0
+# bundle), which would skip this section on exactly the installs it targets.
+# Only runs if the marketplace custom app is actually installed, and only
+# touches a file if all four anchors are present exactly once - on a real
+# 1.3.0+ Rspack bundle the minified identifiers differ and the anchors simply
+# won't match, so this safely no-ops there instead of relying on version
+# detection.
+if ($customAppBundles -contains "marketplace") {
+    Write-Log "[*] Restoring Marketplace nav/route (1.2.x xpui-snapshot.js workaround)..." "Cyan"
+
+    $navEdits = @(
+        @{
+            Name   = 'lazy component'
+            Marker = 'spicetifyApp0=D.lazy'
+            Find   = 'return{default:e}}),ok=()=>'
+            Repl   = 'return{default:e}}),spicetifyApp0=D.lazy((()=>i.e("spicetify-routes-marketplace").then(i.bind(i,"spicetify-routes-marketplace")))),ok=()=>'
+        },
+        @{
+            Name   = 'route'
+            Marker = 'path:"/marketplace/*"'
+            Find   = '(0,y.jsx)(eO.qh,{path:"/settings",element:(0,y.jsx)(_x.$,{to:"/"})})'
+            Repl   = '(0,y.jsx)(eO.qh,{path:"/marketplace/*",pathV6:"/marketplace/*",element:(0,y.jsx)(spicetifyApp0,{})}),(0,y.jsx)(eO.qh,{path:"/settings",element:(0,y.jsx)(_x.$,{to:"/"})})'
+        },
+        @{
+            Name   = 'nav icon'
+            Marker = '_renderNavLinks(["marketplace"'
+            Find   = 'c&&(0,y.jsxs)(dh,{children:[o?(0,y.jsx)(d_,{}):(0,y.jsx)(dm,{}),(0,y.jsx)(dl,{className:dt})'
+            Repl   = 'c&&(0,y.jsxs)(dh,{children:[o?(0,y.jsx)(d_,{}):(0,y.jsx)(dm,{}),(0,y.jsx)(dl,{className:dt}),Spicetify._renderNavLinks(["marketplace",], true)'
+        },
+        @{
+            Name   = 'stylesheet allowlist'
+            Marker = '"spicetify-routes-marketplace":1'
+            Find   = 'a.f.miniCss=function(e,t){if(d[e])t.push(d[e]);else 0!==d[e]&&({'
+            Repl   = 'a.f.miniCss=function(e,t){if(d[e])t.push(d[e]);else 0!==d[e]&&({"spicetify-routes-marketplace":1,'
+        }
+    )
+
+    $navTargets = @(
+        $xpuiJs
+        "$env:APPDATA\spicetify\Extracted\Raw\xpui\xpui.js"
+        "$env:APPDATA\spicetify\Extracted\Themed\xpui\xpui.js"
+    ) | Select-Object -Unique | Where-Object { Test-Path $_ }
+
+    foreach ($navPath in $navTargets) {
+        $isLive = ($navPath -eq $xpuiJs)
+        $navText = if ($isLive) { $xpuiContent } else { [System.IO.File]::ReadAllText($navPath, [System.Text.Encoding]::UTF8) }
+
+        $navTodo = @()
+        $navAbort = $false
+        foreach ($e in $navEdits) {
+            if ($navText.Contains($e.Marker)) { continue }
+            $count = 0; $i = 0
+            while (($i = $navText.IndexOf($e.Find, $i)) -ge 0) { $count++; $i += $e.Find.Length }
+            if ($count -ne 1) {
+                Write-Log ("  [-] Marketplace nav anchor '{0}' matched {1}x in {2} - left untouched" -f $e.Name, $count, (Split-Path $navPath -Leaf)) "Yellow"
+                $navAbort = $true
+                break
+            }
+            $navTodo += $e
+        }
+
+        if ($navAbort -or $navTodo.Count -eq 0) { continue }
+
+        $navBak = "$navPath.prenav.bak"
+        if (-not (Test-Path $navBak)) { Copy-Item $navPath $navBak }
+        foreach ($e in $navTodo) { $navText = $navText.Replace($e.Find, $e.Repl) }
+
+        if ($isLive) {
+            $xpuiContent = $navText
+            $xpuiPatched = $true
+        } else {
+            [System.IO.File]::WriteAllText($navPath, $navText, (New-Object System.Text.UTF8Encoding($false)))
+        }
+        Write-Log ("  [+] Restored Marketplace nav icon/route/stylesheet in {0}" -f $navPath) "Green"
     }
 }
 
