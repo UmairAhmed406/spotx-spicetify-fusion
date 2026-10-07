@@ -91,6 +91,18 @@ if (Test-Path $SpotifyExe) {
 
 $xpuiContent = [System.IO.File]::ReadAllText($xpuiJs, [System.Text.Encoding]::UTF8)
 
+# The chunk-registration global xpui.js's own runtime actually reads (e.g.
+# rspackChunkclient_web, webpackChunkclient_web, or bare rspackChunk - this has
+# been observed to vary by build independently of the 1.2.x/1.3.x version
+# split). Section D needs the real name: pushing a custom-app bundle's module
+# onto the wrong global means the loader's "did this chunk register?" check
+# never passes, so it throws ChunkLoadError "missing" even though the file
+# downloaded fine - the app simply never saw its own module.
+$chunkGlobalName = 'rspackChunk'
+if ($xpuiContent -match 'typeof self\?self:global\)\.(\w+)=') {
+    $chunkGlobalName = $Matches[1]
+}
+
 $is130OrAbove = $false
 if ($detectedVersion -ne "unknown" -and $detectedVersion -match '^1\.([3-9]|\d{2,})\.') {
     $is130OrAbove = $true
@@ -225,10 +237,19 @@ if ($customAppBundles -contains "marketplace") {
             Repl   = '(0,y.jsx)(eO.qh,{path:"/marketplace/*",pathV6:"/marketplace/*",element:(0,y.jsx)(spicetifyApp0,{})}),(0,y.jsx)(eO.qh,{path:"/settings",element:(0,y.jsx)(_x.$,{to:"/"})})'
         },
         @{
+            # spicetifyWrapper.js's _renderNavLinks calls Spicetify.React.useReducer as
+            # its very first line, before its own "are the deps ready" guard.
+            # Spicetify.React resolves asynchronously, after the nav bar's first
+            # (synchronous, boot-time) render - calling this unguarded throws and trips
+            # xpui's top-level error boundary into "Something went wrong" on every
+            # launch. try/catch discards that one failed attempt (it never reaches
+            # React's dispatcher, so no hook bookkeeping happens) and relies on the
+            # sidebar's frequent natural re-renders to retry once ready. Same pattern as
+            # the useNavigateStable fix in Section B2 above.
             Name   = 'nav icon'
             Marker = '_renderNavLinks(["marketplace"'
             Find   = 'c&&(0,y.jsxs)(dh,{children:[o?(0,y.jsx)(d_,{}):(0,y.jsx)(dm,{}),(0,y.jsx)(dl,{className:dt})'
-            Repl   = 'c&&(0,y.jsxs)(dh,{children:[o?(0,y.jsx)(d_,{}):(0,y.jsx)(dm,{}),(0,y.jsx)(dl,{className:dt}),Spicetify._renderNavLinks(["marketplace",], true)'
+            Repl   = 'c&&(0,y.jsxs)(dh,{children:[o?(0,y.jsx)(d_,{}):(0,y.jsx)(dm,{}),(0,y.jsx)(dl,{className:dt}),(()=>{try{return Spicetify._renderNavLinks(["marketplace",], true)}catch(err){return null}})()'
         },
         @{
             Name   = 'stylesheet allowlist'
@@ -319,12 +340,12 @@ if (Test-Path $wrapperJs) {
 
 # SECTION D: Fix custom apps push headers in spicetify-routes-*.js
 if ($routeFiles.Count -gt 0) {
-    Write-Log "[*] Inspecting custom app route bundles..." "Cyan"
+    Write-Log ("[*] Inspecting custom app route bundles (chunk global: {0})..." -f $chunkGlobalName) "Cyan"
     foreach ($rf in $routeFiles) {
         $rc = [System.IO.File]::ReadAllText($rf.FullName, [System.Text.Encoding]::UTF8)
         $pushIdx = $rc.IndexOf(').push([[')
         if ($pushIdx -gt 0 -and $pushIdx -lt 300) {
-            $fixedHead = '(("u">typeof self?self:global).rspackChunk||=[]' + $rc.Substring($pushIdx)
+            $fixedHead = "((""u"">typeof self?self:global).$chunkGlobalName||=[]" + $rc.Substring($pushIdx)
             [System.IO.File]::WriteAllText($rf.FullName, $fixedHead, (New-Object System.Text.UTF8Encoding($false)))
             Write-Log "  [+] Fixed bundle push chain for $($rf.Name)" "Green"
         }

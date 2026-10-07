@@ -228,6 +228,26 @@ Properties:
   2026-10-07). Re-run after a Spotify update, `spicetify apply` / `backup apply` / `restore`, or a Spicetify upgrade —
   or just re-run `fix.ps1`, which now covers it.
 
+Two further issues surfaced while re-verifying against Spicetify 2.45.3 (both now fixed, confirmed live via Chrome
+DevTools Protocol against the actual running client, not just string matching):
+
+- **Nav icon call crashed the whole app on launch**: `spicetifyWrapper.js`'s `_renderNavLinks` calls
+  `Spicetify.React.useReducer(...)` as its very first line, before its own "are the deps ready" guard.
+  `Spicetify.React` is resolved asynchronously (`[spicetifyWrapper] Waiting for required webpack modules to load`),
+  so calling it unguarded on the nav bar's first render — which happens synchronously at boot, before that resolves —
+  threw `Cannot read properties of undefined (reading 'useReducer')`, uncaught, tripping xpui's top-level error
+  boundary into a full-page "Something went wrong" on every launch. The nav icon edit now wraps the call in a
+  `try/catch` (same pattern as the `useNavigateStable` fix in `fix.ps1` Section B2); the failed attempt never reaches
+  React's dispatcher, so no hook-order bookkeeping happens, and the sidebar's frequent natural re-renders retry it
+  automatically once `Spicetify.React` is actually set.
+- **Marketplace chunk registered on the wrong global, so it never loaded** (`fix.ps1` Section D, pre-existing, not
+  introduced by this fix): Section D rewrites every custom-app bundle's chunk-registration header to push its module
+  onto a hardcoded `global.rspackChunk` array. On this build xpui.js's own runtime reads from `rspackChunkclient_web`
+  instead — a different global — so `spicetify-routes-marketplace.js` downloaded and executed fine but its module
+  never reached the loader, surfacing as `ChunkLoadError: Loading chunk spicetify-routes-marketplace failed. (missing:
+  ...)` on every navigation to Marketplace despite the file being reachable. Section D now detects the actual global
+  name from `xpui.js` itself (matching the `typeof self?self:global).<name>=` pattern) instead of hardcoding it.
+
 ## 📚 Investigative Blog Articles (In-Depth Technical Deep Dive)
 
 For the full reverse-engineering reports with decompiled bytecode and AST analyses, read our technical trilogy (Chinese only):
